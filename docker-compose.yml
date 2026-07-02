@@ -109,9 +109,9 @@ services:
     image: grafana/grafana:11.5.0
     restart: unless-stopped
     environment:
-      # No Coolify, defina o domínio via variável SERVICE_FQDN_GRAFANA_3000
-      # ou configure o domínio pela UI apontando para a porta 3000.
-      - GF_SERVER_ROOT_URL=${SERVICE_FQDN_GRAFANA_3000:-${SERVICE_FQDN_GRAFANA:-http://localhost:3000}}
+      # Declaração obrigatória: Coolify gera domínio + roteamento Traefik na porta 3000
+      - SERVICE_URL_GRAFANA_3000
+      - GF_SERVER_ROOT_URL=${SERVICE_URL_GRAFANA_3000:-http://localhost:3000}
       - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -123,7 +123,13 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
     expose:
-      - "3000"   # Coolify roteia via proxy; não bindar no host (evita conflito de porta)
+      - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on:
       - prometheus
       - loki
