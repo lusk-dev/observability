@@ -109,14 +109,14 @@ services:
     image: grafana/grafana:11.5.0
     restart: unless-stopped
     environment:
-      # Declaração obrigatória: Coolify gera domínio + roteamento Traefik na porta 3000
-      - SERVICE_URL_GRAFANA_3000
-      - GF_SERVER_ROOT_URL=${SERVICE_URL_GRAFANA_3000:-http://localhost:3000}
-      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
-      - GF_INSTALL_PLUGINS=grafana-pyroscope-datasource
+      # Coolify v4.420.5+: domínio em Configuration > grafana > Domains (porta 3000).
+      # O Coolify injeta SERVICE_URL_GRAFANA_3000 automaticamente — não declare manualmente.
+      GF_SERVER_ROOT_URL: ${SERVICE_URL_GRAFANA_3000:-http://localhost:3000}
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+      GF_PLUGINS_PREINSTALL: grafana-pyroscope-datasource
     configs:
       - source: grafana_datasources
         target: /etc/grafana/provisioning/datasources/datasources.yaml
@@ -125,11 +125,11 @@ services:
     expose:
       - "3000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 60s
     depends_on:
       - prometheus
       - loki
