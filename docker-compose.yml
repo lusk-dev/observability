@@ -3,6 +3,10 @@ name: observability
 # Stack de observabilidade (LGTM + OTel + Pyroscope) para deploy no Coolify.
 # Ponto de entrada da telemetria: OpenTelemetry Collector (OTLP em 4317/4318).
 # Apenas o Grafana é exposto publicamente; o restante fica na rede interna.
+#
+# Configs dos serviços estão inline (seção `configs`) para evitar bind mounts
+# de arquivos individuais, que falham no Coolify quando o host cria diretórios
+# fantasma no lugar dos arquivos esperados.
 
 x-logging: &default-logging
   driver: json-file
@@ -18,8 +22,9 @@ services:
     image: otel/opentelemetry-collector-contrib:0.116.0
     restart: unless-stopped
     command: ["--config=/etc/otel-collector-config.yaml"]
-    volumes:
-      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    configs:
+      - source: otel_collector_config
+        target: /etc/otel-collector-config.yaml
     ports:
       # Exponha estas portas somente se seus apps enviarem telemetria de fora
       # do Coolify. Dentro da mesma rede, use o hostname "otel-collector".
@@ -45,8 +50,10 @@ services:
       - "--storage.tsdb.retention.time=15d"
       - "--web.enable-remote-write-receiver"
       - "--web.enable-lifecycle"
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     networks:
       - observability
@@ -59,8 +66,10 @@ services:
     image: grafana/loki:3.3.2
     restart: unless-stopped
     command: ["-config.file=/etc/loki/loki-config.yaml"]
+    configs:
+      - source: loki_config
+        target: /etc/loki/loki-config.yaml
     volumes:
-      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
       - loki-data:/loki
     networks:
       - observability
@@ -73,8 +82,10 @@ services:
     image: grafana/tempo:2.7.0
     restart: unless-stopped
     command: ["-config.file=/etc/tempo/tempo.yaml"]
+    configs:
+      - source: tempo_config
+        target: /etc/tempo/tempo.yaml
     volumes:
-      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
     networks:
       - observability
@@ -131,3 +142,173 @@ volumes:
   tempo-data:
   pyroscope-data:
   grafana-data:
+
+configs:
+  otel_collector_config:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+
+      processors:
+        batch:
+          timeout: 5s
+          send_batch_size: 1024
+        memory_limiter:
+          check_interval: 2s
+          limit_percentage: 80
+          spike_limit_percentage: 25
+        resourcedetection:
+          detectors: [env, system]
+          timeout: 5s
+
+      exporters:
+        # Traces -> Tempo (OTLP gRPC)
+        otlp/tempo:
+          endpoint: tempo:4317
+          tls:
+            insecure: true
+
+        # Métricas -> Prometheus (remote write)
+        prometheusremotewrite:
+          endpoint: http://prometheus:9090/api/v1/write
+          resource_to_telemetry_conversion:
+            enabled: true
+
+        # Logs -> Loki (endpoint OTLP nativo do Loki 3.x)
+        otlphttp/loki:
+          endpoint: http://loki:3100/otlp
+          tls:
+            insecure: true
+
+        debug:
+          verbosity: basic
+
+      service:
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [memory_limiter, resourcedetection, batch]
+            exporters: [otlp/tempo]
+          metrics:
+            receivers: [otlp]
+            processors: [memory_limiter, resourcedetection, batch]
+            exporters: [prometheusremotewrite]
+          logs:
+            receivers: [otlp]
+            processors: [memory_limiter, resourcedetection, batch]
+            exporters: [otlphttp/loki]
+        telemetry:
+          logs:
+            level: info
+
+  prometheus_config:
+    content: |
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+
+      scrape_configs:
+        - job_name: prometheus
+          static_configs:
+            - targets: ["localhost:9090"]
+
+        # O OTel Collector envia métricas via remote-write; ainda assim é útil
+        # coletar as métricas internas do próprio Collector.
+        - job_name: otel-collector
+          static_configs:
+            - targets: ["otel-collector:8888"]
+
+  loki_config:
+    content: |
+      auth_enabled: false
+
+      server:
+        http_listen_port: 3100
+        grpc_listen_port: 9096
+        log_level: info
+
+      common:
+        instance_addr: 127.0.0.1
+        path_prefix: /loki
+        storage:
+          filesystem:
+            chunks_directory: /loki/chunks
+            rules_directory: /loki/rules
+        replication_factor: 1
+        ring:
+          kvstore:
+            store: inmemory
+
+      schema_config:
+        configs:
+          - from: 2024-01-01
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: index_
+              period: 24h
+
+      limits_config:
+        retention_period: 168h        # 7 dias
+        allow_structured_metadata: true
+        volume_enabled: true
+
+      compactor:
+        working_directory: /loki/compactor
+        retention_enabled: true
+        delete_request_store: filesystem
+
+      ruler:
+        alertmanager_url: http://localhost:9093
+
+  tempo_config:
+    content: |
+      server:
+        http_listen_port: 3200
+        grpc_listen_port: 9095
+
+      distributor:
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: 0.0.0.0:4317
+              http:
+                endpoint: 0.0.0.0:4318
+
+      ingester:
+        max_block_duration: 5m
+
+      compactor:
+        compaction:
+          block_retention: 168h        # 7 dias
+
+      storage:
+        trace:
+          backend: local
+          wal:
+            path: /var/tempo/wal
+          local:
+            path: /var/tempo/blocks
+
+      # Gera métricas RED a partir dos traces e envia ao Prometheus (remote-write)
+      metrics_generator:
+        registry:
+          external_labels:
+            source: tempo
+        storage:
+          path: /var/tempo/generator/wal
+          remote_write:
+            - url: http://prometheus:9090/api/v1/write
+              send_exemplars: true
+
+      overrides:
+        defaults:
+          metrics_generator:
+            processors: [service-graphs, span-metrics]
